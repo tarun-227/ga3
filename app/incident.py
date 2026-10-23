@@ -207,7 +207,7 @@ def build_plan(out, inc, cat, diag_tools, effect_tools, maxd, ev_ids):
         if not isinstance(d, dict):
             continue
         name = _match(d.get("toolName"), diag_tools)
-        if name is None or any(x["toolName"] == name and x["arguments"] == d.get("arguments") for x in diags):
+        if name is None or any(x["toolName"] == name for x in diags):
             continue
         args, missing = clean_args(d.get("arguments"), cat[name].get("inputSchema"))
         if missing:
@@ -529,7 +529,7 @@ async def create(request: Request):
         dispatches = [new_dispatch(st, make_action(st, "diagnostic", d), 1) for d in p["diagnostics"]]
         st["pendingDispatches"], st["pendingApprovals"] = dispatches, []
         resp = step_view(st, dispatches, [])
-        st["initialResponse"] = resp
+        st["initialResponse"] = st["lastView"] = resp
         kv_put(NS_RUN, run_id, st)
         return JSONResponse(resp)
 
@@ -607,6 +607,7 @@ async def receipts(run_id: str, request: Request):
         work["pendingDispatches"], work["pendingApprovals"] = dispatches, appr
         resp = step_view(work, dispatches, appr)
         work["receipts"][rid] = {"hash": rhash, "response": resp}
+        work["lastView"] = resp
         kv_put(NS_RUN, run_id, work)
         return JSONResponse(resp)
 
@@ -617,4 +618,4 @@ async def get_run(run_id: str):
     st = kv_get(NS_RUN, run_id)
     if not st:
         return jerr(404, "unknown run")
-    return JSONResponse(full_view(st))
+    return JSONResponse(st.get("lastView") or full_view(st))
