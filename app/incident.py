@@ -1,4 +1,5 @@
 """Q4: Observable incident triage agent (ga5-incident-agent/v2)."""
+import asyncio
 import copy
 import json
 import os
@@ -9,7 +10,7 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from .common import LLM_MODEL, digest, kv_get, kv_put, llm_json, lock_for
+from .common import LLM_MODEL, digest, kv_get, kv_put, llm_json, lock_for, log_error
 
 router = APIRouter()
 PROFILE = "ga5-incident-agent/v2"
@@ -108,26 +109,98 @@ Return JSON: {"analysis":"<brief>","rootCause":"...","evidence":["ev_..",...],
 
 
 def clean_args(args, schema):
+    """Normalise model arguments against the tool schema without rejecting them."""
     if not isinstance(args, dict):
-        raise ValueError("arguments must be an object")
+        args = {}
     schema = schema if isinstance(schema, dict) else {}
     props = schema.get("properties") if isinstance(schema.get("properties"), dict) else None
     if props is not None and schema.get("additionalProperties") is False:
         args = {k: v for k, v in args.items() if k in props}
-    for r in schema.get("required") or []:
-        if r not in args:
-            raise ValueError(f"missing required argument {r}")
+    missing = [r for r in schema.get("required") or [] if r not in args]
     if props:
-        for k, v in args.items():
+        for k, v in list(args.items()):
             p = props.get(k) or {}
-            if "enum" in p and v not in p["enum"]:
-                raise ValueError(f"argument {k} must be one of {p['enum']}")
-            if p.get("type") == "integer" and isinstance(v, str) and v.isdigit():
+            if p.get("type") == "integer" and isinstance(v, str) and v.strip().lstrip("-").isdigit():
                 args[k] = int(v)
-    return args
+            if "enum" in p and v not in p["enum"]:
+                low = {str(e).lower(): e for e in p["enum"]}
+                if str(v).lower() in low:
+                    args[k] = low[str(v).lower()]
+                else:
+                    missing.append(k)
+    return args, missing
+
+
+def _ids(v, allowed):
+    out = []
+    for e in v or []:
+        if isinstance(e, str):
+            e = e.strip().strip("[]").strip()
+            if e in allowed and e not in out:
+                out.append(e)
+    return out
+
+
+def _match(name, options):
+    if name in options:
+        return name
+    norm = lambda x: re.sub(r"[^a-z0-9]", "", str(x).lower())
+    for o in options:
+        if norm(o) == norm(name):
+            return o
+    return None
+
+
+def build_plan(out, inc, cat, diag_tools, effect_tools, maxd, ev_ids):
+    """Returns (plan, problems). The plan is always usable; problems describe what to ask the model to fix."""
+    problems = []
+    rc = _match(out.get("rootCause"), inc["allowedRootCauses"])
+    if rc is None:
+        problems.append("rootCause must be exactly one of allowedRootCauses")
+        rc = inc["allowedRootCauses"][0]
+    ev = _ids(out.get("evidence"), ev_ids)
+    extra = []
+    for d in (out.get("diagnostics") or []) + [out.get("effect") or {}]:
+        if isinstance(d, dict):
+            extra += [e for e in _ids(d.get("evidence"), ev_ids) if e not in ev and e not in extra]
+    if len(ev) < 2:
+        problems.append("diagnosis needs 2-4 evidence IDs copied exactly from the transcript")
+        ev = (ev + extra + [e for e in ev_ids if e not in ev and e not in extra])[:2]
+    ev = ev[:4]
+    diags = []
+    for d in out.get("diagnostics") or []:
+        if not isinstance(d, dict):
+            continue
+        name = _match(d.get("toolName"), diag_tools)
+        if name is None or any(x["toolName"] == name and x["arguments"] == d.get("arguments") for x in diags):
+            continue
+        args, missing = clean_args(d.get("arguments"), cat[name].get("inputSchema"))
+        if missing:
+            problems.append(f"diagnostic {name} is missing/invalid arguments {missing}")
+        diags.append({"toolName": name, "arguments": args, "evidence": _ids(d.get("evidence"), ev)[:2] or [ev[0]]})
+    diags = diags[:maxd]
+    if not diags:
+        problems.append(f"at least one diagnostic from {diag_tools} is required")
+        if diag_tools:
+            name = diag_tools[0]
+            args, _ = clean_args({"service": inc.get("service")}, cat[name].get("inputSchema"))
+            diags = [{"toolName": name, "arguments": args, "evidence": [ev[0]]}]
+    eff = out.get("effect") if isinstance(out.get("effect"), dict) else {}
+    name = _match(eff.get("toolName"), effect_tools)
+    if name is None:
+        problems.append(f"effect toolName must be one of {effect_tools}")
+        name = effect_tools[0] if effect_tools else None
+    effect = None
+    if name:
+        args, missing = clean_args(eff.get("arguments"), cat[name].get("inputSchema"))
+        if missing:
+            problems.append(f"effect {name} is missing/invalid arguments {missing}")
+        effect = {"toolName": name, "arguments": args, "evidence": _ids(eff.get("evidence"), ev)[:2] or [ev[0]]}
+    return {"rootCause": rc, "evidence": ev, "diagnostics": diags, "effect": effect}, problems
 
 
 async def plan(body):
+    """Returns (plan, source) where source is "model" or "fallback"."""
     inc = body["incident"]
     pol = body.get("policy") or {}
     cat = {t["name"]: t for t in body["toolCatalog"]}
@@ -144,46 +217,31 @@ async def plan(body):
         "policy": {"maximumDiagnostics": maxd, "effectTools": effect_tools,
                    "approvalRequiredFor": pol.get("approvalRequiredFor") or []},
     }, ensure_ascii=False)
-    last = None
-    deadline = time.monotonic() + 15
-    while deadline - time.monotonic() > 4:
+    best, last = None, None
+    deadline = time.monotonic() + 15.5
+    for _ in range(3):
+        if deadline - time.monotonic() < 3:
+            break
         try:
-            out = await llm_json(SYSTEM, user + (f"\n\nPrevious answer invalid: {last}. Fix it." if last else ""),
-                                 timeout=min(13, deadline - time.monotonic()))
+            out = await llm_json(SYSTEM, user + (f"\n\nPrevious answer had problems: {last}. Fix them." if last else ""),
+                                 timeout=deadline - time.monotonic())
         except Exception as e:  # noqa: BLE001
-            last = f"request failed: {type(e).__name__}"
+            log_error("incident.plan", e)
+            if best:
+                break
+            await asyncio.sleep(0.5)
             continue
-        try:
-            rc = out.get("rootCause")
-            if rc not in inc["allowedRootCauses"]:
-                raise ValueError("rootCause must be one of allowedRootCauses")
-            ev = [e.strip("[] ") for e in out.get("evidence") or [] if isinstance(e, str)]
-            ev = [e for e in dict.fromkeys(ev) if e in ev_ids]
-            if not 2 <= len(ev) <= 4:
-                raise ValueError("diagnosis needs 2-4 valid evidence IDs from the transcript")
-            diags = []
-            for d in (out.get("diagnostics") or [])[:maxd]:
-                if d.get("toolName") not in diag_tools:
-                    raise ValueError(f"diagnostic toolName must be one of {diag_tools}")
-                dev = [e.strip("[] ") for e in d.get("evidence") or [] if isinstance(e, str)]
-                dev = [e for e in dict.fromkeys(dev) if e in ev] or [ev[0]]
-                diags.append({"toolName": d["toolName"],
-                              "arguments": clean_args(d.get("arguments") or {}, cat[d["toolName"]].get("inputSchema")),
-                              "evidence": dev})
-            if not diags:
-                raise ValueError("at least one diagnostic is required")
-            eff = out.get("effect") or {}
-            if eff.get("toolName") not in effect_tools:
-                raise ValueError(f"effect toolName must be one of {effect_tools}")
-            eev = [e.strip("[] ") for e in eff.get("evidence") or [] if isinstance(e, str)]
-            eev = [e for e in dict.fromkeys(eev) if e in ev] or [ev[0]]
-            effect = {"toolName": eff["toolName"],
-                      "arguments": clean_args(eff.get("arguments") or {}, cat[eff["toolName"]].get("inputSchema")),
-                      "evidence": eev}
-            return {"rootCause": rc, "evidence": ev, "diagnostics": diags, "effect": effect}
-        except ValueError as e:
-            last = str(e)[:300]
-    raise RuntimeError(f"plan invalid: {last}")
+        p, problems = build_plan(out, inc, cat, diag_tools, effect_tools, maxd, ev_ids)
+        if not problems:
+            return p, "model"
+        log_error("incident.plan", ValueError("; ".join(problems)))
+        best, last = p, "; ".join(problems)[:400]
+        if deadline - time.monotonic() < 8:  # not enough time for a second full answer
+            break
+    if best:
+        return best, "model"
+    p, _ = build_plan({}, inc, cat, diag_tools, effect_tools, maxd, ev_ids)
+    return p, "fallback"
 
 
 # ---------------------------------------------------------------- state machine helpers
@@ -228,6 +286,8 @@ def advance(st):
     eff = next((a for a in st["actions"] if a["phase"] == "effect"), None)
     if eff is None:
         spec = st["plan"]["effect"]
+        if spec is None:
+            return finish(st, "completed")
         if requires_approval(st, spec["toolName"]):
             appr = st.get("approval")
             if appr is None:
@@ -257,12 +317,12 @@ def advance(st):
 def finish(st, status, suppressed=False):
     st["status"] = status
     st["endTime"] = ns()
-    if suppressed:
-        eff = st["plan"]["effect"]
+    eff = st["plan"]["effect"]
+    if suppressed and eff:
         st["suppressed"] = [{"toolName": eff["toolName"], "reason": "prerequisite_failed"}]
         st["chosenEffect"] = None
     else:
-        st["chosenEffect"] = st["plan"]["effect"]["toolName"] if status == "completed" else None
+        st["chosenEffect"] = eff["toolName"] if status == "completed" and eff else None
     return [], []
 
 
@@ -408,15 +468,11 @@ async def create(request: Request):
         pol = body.get("policy") or {}
         chat_start = ns()
         plan_key = digest([body["incident"], body["toolCatalog"], pol.get("effectTools"), pol.get("maximumDiagnostics")])
-        source = "model"
-        try:
-            p = await plan(body)
+        p, source = await plan(body)
+        if source == "model":
             kv_put(NS_PLAN, plan_key, p)
-        except Exception:
-            p = kv_get(NS_PLAN, plan_key)
-            source = "cache"
-            if not p:
-                return jerr(503, "planner unavailable")
+        elif kv_get(NS_PLAN, plan_key):
+            p, source = kv_get(NS_PLAN, plan_key), "cache"
         chat_end = ns()
         st = {
             "runId": run_id, "reqHash": req_hash, "status": "waiting",

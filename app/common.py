@@ -73,6 +73,16 @@ def kv_list(ns, prefix=""):
 
 
 _locks: dict = {}
+ERRORS: list = []
+
+
+def log_error(where, exc):
+    """Keep the last few failures (no request content) for /debug/errors."""
+    import datetime
+    msg = f"{type(exc).__name__}: {str(exc)[:300]}"
+    ERRORS.append({"at": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z", "where": where, "error": msg})
+    del ERRORS[:-100]
+    print(f"[error] {where}: {msg}", flush=True)
 
 
 def lock_for(key) -> asyncio.Lock:
@@ -99,14 +109,23 @@ async def llm_json(system: str, user: str, timeout: float = 40.0, model: str | N
         "response_format": {"type": "json_object"},
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
     }
+    loop = asyncio.get_running_loop()
+    end = loop.time() + timeout
     async with _llm_sem:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(
-                f"{LLM_BASE_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {LLM_API_KEY}"},
-                json=body,
-            )
-    r.raise_for_status()
+        async with httpx.AsyncClient(timeout=max(1.0, end - loop.time())) as client:
+            for attempt in range(3):
+                r = await client.post(
+                    f"{LLM_BASE_URL}/chat/completions",
+                    headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+                    json=body,
+                    timeout=max(1.0, end - loop.time()),
+                )
+                if r.status_code in (429, 500, 502, 503, 504) and end - loop.time() > 4:
+                    await asyncio.sleep(1 + attempt)
+                    continue
+                break
+    if r.status_code >= 400:
+        raise RuntimeError(f"LLM HTTP {r.status_code}: {r.text[:200]}")
     text = r.json()["choices"][0]["message"]["content"]
     return parse_json_obj(text)
 

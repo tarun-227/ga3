@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from .common import canon, digest, kv_get, kv_put, llm_json, lock_for
+from .common import canon, digest, kv_get, kv_put, llm_json, lock_for, log_error
 
 router = APIRouter()
 PROFILE = "ga5-mailroom-action-gate/v2"
@@ -238,6 +238,7 @@ async def decide(d, allowed, deadline):
             break
         except Exception as e:  # noqa: BLE001
             last_err, invalid_output = str(e)[:300], isinstance(e, ValueError)
+            log_error("mailroom.decide", e)
     else:
         prop = fallback(d, fp, allowed, last_err)
         if invalid_output:  # the model keeps answering invalidly; a request failure or timeout is retried next time

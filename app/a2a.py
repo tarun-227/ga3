@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from .common import canon, digest, kv_get, kv_list, kv_put, llm_json, lock_for, sha256_hex
+from .common import canon, digest, kv_get, kv_list, kv_put, llm_json, lock_for, log_error, sha256_hex
 
 router = APIRouter()
 MT = "application/a2a+json"
@@ -202,8 +202,10 @@ async def decide(pkg, policy_revision, deadline):
             return dec
         except ValueError as e:
             last = str(e)[:300]
-        except Exception:  # noqa: BLE001
+            log_error("a2a.decide", e)
+        except Exception as e:  # noqa: BLE001
             last = "request failed"
+            log_error("a2a.decide", e)
     raise RuntimeError(f"decision failed: {last}")
 
 

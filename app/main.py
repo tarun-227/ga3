@@ -14,6 +14,12 @@ app.include_router(incident.router)
 GLB = os.path.join(os.path.dirname(__file__), "face.glb")
 
 
+@app.get("/debug/errors")
+async def debug_errors():
+    from .common import ERRORS
+    return {"errors": ERRORS[-50:]}
+
+
 @app.get("/")
 async def health():
     return {"ok": True, "endpoints": ["/a2a/", "/mailroom", "/incident", "/face.glb"]}
