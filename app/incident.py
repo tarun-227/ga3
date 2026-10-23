@@ -145,8 +145,14 @@ async def plan(body):
                    "approvalRequiredFor": pol.get("approvalRequiredFor") or []},
     }, ensure_ascii=False)
     last = None
-    for _ in range(2):
-        out = await llm_json(SYSTEM, user + (f"\n\nPrevious answer invalid: {last}. Fix it." if last else ""), timeout=13)
+    deadline = time.monotonic() + 15
+    while deadline - time.monotonic() > 4:
+        try:
+            out = await llm_json(SYSTEM, user + (f"\n\nPrevious answer invalid: {last}. Fix it." if last else ""),
+                                 timeout=min(13, deadline - time.monotonic()))
+        except Exception as e:  # noqa: BLE001
+            last = f"request failed: {type(e).__name__}"
+            continue
         try:
             rc = out.get("rootCause")
             if rc not in inc["allowedRootCauses"]:

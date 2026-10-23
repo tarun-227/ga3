@@ -19,7 +19,7 @@ async def health():
     return {"ok": True, "endpoints": ["/a2a/", "/mailroom", "/incident", "/face.glb"]}
 
 
-@app.get("/face.glb")
+@app.api_route("/face.glb", methods=["GET", "HEAD"])
 async def face():
     return FileResponse(GLB, media_type="model/gltf-binary", headers={
         "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600"})

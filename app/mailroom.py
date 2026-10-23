@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import json
+import time
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, Request
@@ -220,7 +221,7 @@ def build_proposal(d, out, allowed):
     return action, target, payload, evid
 
 
-async def decide(d, allowed):
+async def decide(d, allowed, deadline):
     fp = digest(d)
     key = f"{d['dossierId']}:{fp}:{','.join(sorted(allowed))}"
     cached = kv_get(NS_DEC, key)
@@ -228,10 +229,10 @@ async def decide(d, allowed):
         return cached
     user = f"Allowed actions: {allowed}\n\nDossier:\n{dossier_text(d)}"
     last_err = None
-    for _ in range(3):
+    while deadline - time.monotonic() > 5:
         try:
             msg = user if not last_err else user + f"\n\nYour previous answer was invalid: {last_err}. Fix it."
-            out = await llm_json(SYSTEM, msg, timeout=40)
+            out = await llm_json(SYSTEM, msg, timeout=min(30, deadline - time.monotonic()))
             action, target, payload, ev = build_proposal(d, out, allowed)
             break
         except Exception as e:  # noqa: BLE001
@@ -294,7 +295,8 @@ async def propose(body):
             return err(409, "evaluationId reused with different content")
         dossiers = body["dossiers"]
         try:
-            props = await asyncio.gather(*(decide(d, allowed) for d in dossiers))
+            deadline = time.monotonic() + 48
+            props = await asyncio.gather(*(decide(d, allowed, deadline) for d in dossiers))
         except Exception:
             return err(503, "decision engine unavailable")
         calls = [p["callId"] for p in props]
