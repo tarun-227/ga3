@@ -15,7 +15,8 @@ def answer(system, user):
                 "payload": {"reasonCode": "INFORMATIONAL", "referenceId": d["sources"][0]["sourceId"]},
                 "evidence": [line["lineId"]]}
     body = json.loads(user.split("\n\nPrevious", 1)[0])
-    ev = re.findall(r"\[(ev_[A-Za-z0-9_]+)\]", body["incident"]["transcript"])
+    text = body["incident"].get("transcript") or "\n".join(body["incident"].get("candidateEvidenceLines", []))
+    ev = re.findall(r"\[(ev_[A-Za-z0-9_]+)\]", text)
     dt = body["diagnosticTools"]
     return {"rootCause": body["incident"]["allowedRootCauses"][0], "evidence": ev[:2],
             "diagnostics": [{"toolName": t["name"], "arguments": {"service": body["incident"]["service"]}, "evidence": [ev[0]]} for t in dt[:2]],
