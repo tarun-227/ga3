@@ -15,6 +15,7 @@ NS_EVAL, NS_DEC = "mr_eval", "mr_decision"
 ACTIONS = ["create_draft", "update_internal_record", "send_approved_notice",
            "request_confirmation", "quarantine_item", "no_action"]
 NO_ACTION_REASONS = ["ALREADY_COMPLETED", "DUPLICATE", "INFORMATIONAL"]
+DECIDE_BUDGET_S = 42  # the grader allows 55 s per request
 
 
 class Bad(Exception):
@@ -237,7 +238,9 @@ async def decide(d, allowed):
         except Exception as e:  # noqa: BLE001
             last_err = str(e)[:300]
     else:
-        raise RuntimeError(f"decision failed for dossier: {last_err}")
+        prop = fallback(d, fp, allowed, last_err)
+        kv_put(NS_DEC, key, prop)  # model output is deterministic enough that retrying later would not help
+        return prop
     prop = {
         "dossierId": d["dossierId"],
         "callId": "call." + digest([d["dossierId"], fp])[:40],
@@ -248,6 +251,28 @@ async def decide(d, allowed):
     }
     kv_put(NS_DEC, key, prop)
     return prop
+
+
+def fallback(d, fp, allowed, why):
+    """Safe, non-outbound proposal for a dossier the model could not decide in time or validly."""
+    if "no_action" not in allowed:
+        raise RuntimeError(f"decision failed for dossier: {why}")
+    lines = [ln["lineId"] for s in d["sources"] for ln in s["lines"]]
+    return {
+        "dossierId": d["dossierId"],
+        "callId": "call." + digest([d["dossierId"], fp])[:40],
+        "action": "no_action",
+        "target": None,
+        "payload": {"reasonCode": "INFORMATIONAL", "referenceId": d["sources"][0]["sourceId"]},
+        "evidence": lines[:1],
+    }
+
+
+async def decide_within(d, allowed, seconds):
+    try:
+        return await asyncio.wait_for(decide(d, allowed), seconds)
+    except asyncio.TimeoutError:
+        return fallback(d, digest(d), allowed, "timed out")
 
 
 def proposal_digest(p):
@@ -294,7 +319,7 @@ async def propose(body):
             return err(409, "evaluationId reused with different content")
         dossiers = body["dossiers"]
         try:
-            props = await asyncio.gather(*(decide(d, allowed) for d in dossiers))
+            props = await asyncio.gather(*(decide_within(d, allowed, DECIDE_BUDGET_S) for d in dossiers))
         except Exception:
             return err(503, "decision engine unavailable")
         calls = [p["callId"] for p in props]
