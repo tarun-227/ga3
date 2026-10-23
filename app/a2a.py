@@ -4,6 +4,7 @@ import datetime as dt
 import json
 import os
 import re
+import time
 import uuid
 from decimal import Decimal, InvalidOperation
 
@@ -158,8 +159,8 @@ def to_minor(amount, currency):
     return int((d * mult).to_integral_value())
 
 
-async def decide(pkg, policy_revision):
-    key = digest([pkg, policy_revision])
+async def decide(pkg, policy_revision, deadline):
+    key = digest([{k: v for k, v in pkg.items() if k != "packageId"}, policy_revision])
     cached = kv_get(NS_DEC, key)
     if cached:
         return cached
@@ -171,9 +172,10 @@ async def decide(pkg, policy_revision):
     user = (f"Policy revision: {policy_revision}\n\nBracketed references found in this package: {json.dumps(refs)}\n\n"
             f"Package:\n{json.dumps(pkg, ensure_ascii=False, indent=1)}")
     last = None
-    for _ in range(3):
+    while deadline - time.monotonic() > 5:
         try:
-            out = await llm_json(SYSTEM, user + (f"\n\nPrevious answer invalid: {last}. Fix it." if last else ""), timeout=40)
+            out = await llm_json(SYSTEM, user + (f"\n\nPrevious answer invalid: {last}. Fix it." if last else ""),
+                                 timeout=min(30, deadline - time.monotonic()))
             action = out.get("action")
             if action not in ACTIONS:
                 raise ValueError(f"action must be one of {ACTIONS}")
@@ -258,7 +260,8 @@ async def initial(principal, msg, mkey, mhash, hl):
     if any(not isinstance(i, str) or not i for i in ids) or len(set(ids)) != len(ids):
         return error(400, "INVALID_PARAMS", "invalid package ids")
     try:
-        decs = await asyncio.gather(*(decide(p, data.get("policyRevision")) for p in pkgs))
+        deadline = time.monotonic() + 40
+        decs = await asyncio.gather(*(decide(p, data.get("policyRevision"), deadline) for p in pkgs))
     except Exception:
         return error(503, "UNAVAILABLE", "decision engine unavailable")
     task_id = str(uuid.uuid4())
