@@ -98,8 +98,10 @@ not repeated boilerplate), the tool catalog and the policy. Quoted customer text
 forecasts, other services' notes, old postmortems, unlinked guesses and format checks is not evidence.
 
 1. rootCause: exactly one value from allowedRootCauses.
-   evidence: the 2-4 IDs (exact, without brackets) of the incident-window lines that prove it. Normally cite every decisive
-   incident-window line (lines labelled e.g. "incident-window record", "bounded observation", "on-call finding", "correlated sample").
+   evidence: the 2-4 IDs (exact, without brackets) of the incident-window lines that establish the CAUSE: the observed symptom and
+   the observation that rules out alternatives / isolates the cause. Do NOT put remediation or policy lines in the diagnosis
+   (approved replica targets or ceilings, change-control registers / rollback freezes, runbook ownership or paging requirements,
+   recovery targets); those justify the effect and are cited by the effect only.
 2. diagnostics: the minimum read-only tool calls (1 to maximumDiagnostics) that confirm the root cause. Map each decisive observation
    to the tool that directly measures it, and send independent ones together:
    - a release / rollout / holdback observation -> inspect_deployment {service}
@@ -120,6 +122,7 @@ forecasts, other services' notes, old postmortems, unlinked guesses and format c
    - anything needing a human owner (runbook says page/contact owner, no safe automated fix) -> page_owner {service, severity}
    - nothing justified -> no_action {reasonCode}
    severity: the incident severity (e.g. "SEV-1"). Use only argument names from the tool's inputSchema.
+   The effect cites the remediation/policy line that justifies it (it may be outside the diagnosis evidence).
 Return JSON: {"analysis":"<brief>","rootCause":"...","evidence":["ev_..",...],
 "diagnostics":[{"toolName":"...","arguments":{...},"evidence":["ev_.."]}],
 "effect":{"toolName":"...","arguments":{...},"evidence":["ev_.."]}}"""
@@ -230,7 +233,7 @@ def build_plan(out, inc, cat, diag_tools, effect_tools, maxd, ev_ids):
         args, missing = clean_args(eff.get("arguments"), cat[name].get("inputSchema"))
         if missing:
             problems.append(f"effect {name} is missing/invalid arguments {missing}")
-        effect = {"toolName": name, "arguments": args, "evidence": _ids(eff.get("evidence"), ev)[:2] or [ev[0]]}
+        effect = {"toolName": name, "arguments": args, "evidence": _ids(eff.get("evidence"), ev_ids)[:2] or [ev[0]]}
     return {"rootCause": rc, "evidence": ev, "diagnostics": diags, "effect": effect}, problems
 
 
@@ -461,8 +464,9 @@ def full_view(st, dispatches=None, approvals=None):
         out["approvals"] = approvals if approvals is not None else st.get("pendingApprovals", [])
     else:
         out["dispatches"], out["approvals"] = [], []
-    out["chosenEffect"] = st.get("chosenEffect")
-    out["suppressed"] = st.get("suppressed", [])
+    if st["status"] != "waiting":
+        out["chosenEffect"] = st.get("chosenEffect")
+        out["suppressed"] = st.get("suppressed", [])
     out["actionLog"] = st["actionLog"]
     out["receiptLog"] = st["receiptLog"]
     out["otlp"] = build_otlp(st)
