@@ -120,7 +120,8 @@ async def llm_json(system: str, user: str, timeout: float = 40.0, model: str | N
                     json=body,
                     timeout=max(1.0, end - loop.time()),
                 )
-                if r.status_code in (429, 500, 502, 503, 504) and end - loop.time() > 4:
+                if (r.status_code in (429, 500, 502, 503, 504) and end - loop.time() > 4
+                        and "usage" not in r.text.lower() and "quota" not in r.text.lower()):
                     await asyncio.sleep(1 + attempt)
                     continue
                 break
