@@ -47,6 +47,9 @@ def base_url(request: Request):
 
 
 @router.get("/.well-known/agent-card.json")
+@router.get("/a2a/.well-known/agent-card.json")
+@router.get("/.well-known/agent.json")
+@router.get("/a2a/.well-known/agent.json")
 async def agent_card(request: Request):
     base = base_url(request)
     card = {
