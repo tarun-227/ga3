@@ -228,17 +228,21 @@ async def decide(d, allowed, deadline):
     if cached:
         return cached
     user = f"Allowed actions: {allowed}\n\nDossier:\n{dossier_text(d)}"
-    last_err = None
-    while deadline - time.monotonic() > 5:
+    last_err, invalid_output, attempts = None, False, 0
+    while deadline - time.monotonic() > 5 and attempts < 3:
+        attempts += 1
         try:
             msg = user if not last_err else user + f"\n\nYour previous answer was invalid: {last_err}. Fix it."
             out = await llm_json(SYSTEM, msg, timeout=min(30, deadline - time.monotonic()))
             action, target, payload, ev = build_proposal(d, out, allowed)
             break
         except Exception as e:  # noqa: BLE001
-            last_err = str(e)[:300]
+            last_err, invalid_output = str(e)[:300], isinstance(e, ValueError)
     else:
-        raise RuntimeError(f"decision failed for dossier: {last_err}")
+        prop = fallback(d, fp, allowed, last_err)
+        if invalid_output:  # the model keeps answering invalidly; a request failure or timeout is retried next time
+            kv_put(NS_DEC, key, prop)
+        return prop
     prop = {
         "dossierId": d["dossierId"],
         "callId": "call." + digest([d["dossierId"], fp])[:40],
@@ -249,6 +253,21 @@ async def decide(d, allowed, deadline):
     }
     kv_put(NS_DEC, key, prop)
     return prop
+
+
+def fallback(d, fp, allowed, why):
+    """Safe, non-outbound proposal for a dossier the model could not decide in time or validly."""
+    if "no_action" not in allowed:
+        raise RuntimeError(f"decision failed for dossier: {why}")
+    lines = [ln["lineId"] for s in d["sources"] for ln in s["lines"]]
+    return {
+        "dossierId": d["dossierId"],
+        "callId": "call." + digest([d["dossierId"], fp])[:40],
+        "action": "no_action",
+        "target": None,
+        "payload": {"reasonCode": "INFORMATIONAL", "referenceId": d["sources"][0]["sourceId"]},
+        "evidence": lines[:1],
+    }
 
 
 def proposal_digest(p):
