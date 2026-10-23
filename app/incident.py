@@ -189,9 +189,14 @@ def _match(name, options):
     return None
 
 
-def build_plan(out, inc, cat, diag_tools, effect_tools, maxd, ev_ids):
+REMEDIATION_RE = re.compile(r"approved (?:recovery )?(?:target|capacity ceiling)|change-control|rollback freeze|"
+                            r"runbook (?:assigns|is required)|recovery runbook|requires a linked", re.I)
+
+
+def build_plan(out, inc, cat, diag_tools, effect_tools, maxd, ev_ids, line_text=None):
     """Returns (plan, problems). The plan is always usable; problems describe what to ask the model to fix."""
     problems = []
+    line_text = line_text or {}
     rc = _match(out.get("rootCause"), inc["allowedRootCauses"])
     if rc is None:
         problems.append("rootCause must be exactly one of allowedRootCauses")
@@ -205,6 +210,10 @@ def build_plan(out, inc, cat, diag_tools, effect_tools, maxd, ev_ids):
         problems.append("diagnosis needs 2-4 evidence IDs copied exactly from the transcript")
         ev = (ev + extra + [e for e in ev_ids if e not in ev and e not in extra])[:2]
     ev = ev[:4]
+    # Remediation/policy lines justify the effect, not the diagnosis; keep them out when two cause lines remain.
+    cause = [e for e in ev if not REMEDIATION_RE.search(line_text.get(e, ""))]
+    if len(cause) >= 2:
+        ev = cause
     diags = []
     for d in out.get("diagnostics") or []:
         if not isinstance(d, dict):
@@ -247,6 +256,11 @@ async def plan(body):
     maxd = pol.get("maximumDiagnostics") if isinstance(pol.get("maximumDiagnostics"), int) else 3
     maxd = max(1, min(3, maxd))
     ev_ids = list(dict.fromkeys(EV_RE.findall(inc["transcript"])))
+    line_text = {}
+    for ln in inc["transcript"].split("\n"):
+        m = EV_RE.match(ln.strip())
+        if m:
+            line_text[m.group(1)] = ln
     safe_incident = {k: inc.get(k) for k in ("incidentId", "title", "service", "severity", "allowedRootCauses")}
     cands = candidate_lines(inc["transcript"])
     if cands:
@@ -275,7 +289,7 @@ async def plan(body):
                 break
             await asyncio.sleep(0.5)
             continue
-        p, problems = build_plan(out, inc, cat, diag_tools, effect_tools, maxd, ev_ids)
+        p, problems = build_plan(out, inc, cat, diag_tools, effect_tools, maxd, ev_ids, line_text)
         if not problems:
             return p, "model"
         log_error("incident.plan", ValueError("; ".join(problems)))
