@@ -427,10 +427,7 @@ def full_view(st, dispatches=None, approvals=None):
 
 
 def step_view(st, dispatches, approvals):
-    if st["status"] != "waiting":
-        return full_view(st)
-    return scrub({"runId": st["runId"], "status": "waiting", "diagnosis": st["diagnosis"],
-                  "dispatches": dispatches, "approvals": approvals}, st["secrets"])
+    return full_view(st, dispatches, approvals)
 
 
 # ---------------------------------------------------------------- routes
