@@ -48,17 +48,19 @@ def delete_bookmark(title):
     return {"deleted": title, "user": user}""",
 [("""title = '%s' AND user = '%s'" % (title, user))""", """title = ? AND user = ?", (title, user))""")], "sqlite3"),
 
-("u538", """Fetch spare parts by a list of ids and return their name and stock.""", "normal",
-"""def parts_by_ids(conn, ids):
-    if not ids:
-        return []
-    id_list = ",".join(ids)
-    rows = conn.execute("SELECT id, name, stock FROM spare_parts WHERE id IN (" + id_list + ") ORDER BY name").fetchall()
-    parts = [{"id": r[0], "name": r[1], "stock": r[2]} for r in rows]
-    log.info("loaded %s parts of %s requested", len(parts), len(ids))
-    return parts""",
-[("""    id_list = ",".join(ids)""", """    id_list = ",".join(str(int(i)) for i in ids)""")], "sqlite3"),
-
+("u538", """Add or remove stock of a spare part and write a stock log row, raising an error when the part does not exist.""", "normal",
+"""def adjust_part_stock(self, part_no, delta, reason):
+    cur = self.conn.cursor()
+    cur.execute("UPDATE spare_parts SET stock = stock + %s WHERE part_no = '%s'" % (delta, part_no))
+    if cur.rowcount == 0:
+        raise LookupError(part_no)
+    cur.execute("INSERT INTO stock_log (part_no, delta, reason) VALUES ('%s', %s, '%s')" % (part_no, delta, reason))
+    self.conn.commit()
+    cur.close()
+    self.log.info("part %s adjusted by %s", part_no, delta)
+    return delta""",
+[("""SET stock = stock + %s WHERE part_no = '%s'" % (delta, part_no))""", """SET stock = stock + ? WHERE part_no = ?", (delta, part_no))"""),
+ ("""VALUES ('%s', %s, '%s')" % (part_no, delta, reason))""", """VALUES (?, ?, ?)", (part_no, delta, reason))""")], "sqlite3"),
 ("u539", """Search hiking trails whose name contains a term and return the first twenty-five with their length.""", "normal",
 """def find_trails(self, term, region):
     sql = "SELECT id, name, length_km, region FROM trails WHERE name LIKE '%{}%' AND region = '{}' ORDER BY length_km LIMIT 25".format(term, region)
@@ -447,18 +449,25 @@ ROWS += [
     return books""",
 [("""ORDER BY " + column""", """ORDER BY " + BOOK_SORTS.get(column, "title")""")], "sqlite3"),
 
-("u556", """Delete checked-out visitors whose badge number is in a list and return how many were deleted.""", "hard_positive",
-"""def purge_visitors(conn, badge_numbers):
-    quoted = []
-    for badge in badge_numbers:
-        quoted.append("'" + badge + "'")
-    cur = conn.execute("DELETE FROM visitors WHERE badge IN (" + ",".join(quoted) + ") AND checked_out = 1")
+("u556", """Delete visitor log rows that match the allowed fields given in a dictionary of filters, refusing an empty filter.""", "hard_positive",
+"""def purge_visitor_log(conn, filters):
+    conditions = []
+    for field in ("badge", "host", "gate"):
+        if field in filters:
+            conditions.append(field + " = '" + filters[field] + "'")
+    if not conditions:
+        raise ValueError("no filters given")
+    cur = conn.execute("DELETE FROM visitor_log WHERE " + " AND ".join(conditions))
     conn.commit()
-    log.info("purged %s visitors", cur.rowcount)
+    log.info("purged %s visitor log rows using %s", cur.rowcount, ", ".join(sorted(filters)))
     return cur.rowcount""",
-[("""        quoted.append("'" + badge + "'")""", """        quoted.append("?")"""),
- ("""+ ",".join(quoted) + ") AND checked_out = 1")""", """+ ",".join(quoted) + ") AND checked_out = 1", list(badge_numbers))""")], "sqlite3"),
-
+[("""    conditions = []
+""", """    conditions = []
+    params = []
+"""),
+ ("""            conditions.append(field + " = '" + filters[field] + "'")""", """            conditions.append(field + " = ?")
+            params.append(filters[field])"""),
+ ("""conn.execute("DELETE FROM visitor_log WHERE " + " AND ".join(conditions))""", """conn.execute("DELETE FROM visitor_log WHERE " + " AND ".join(conditions), params)""")], "sqlite3"),
 ("u557", """Run a stored query template for an owner, filling the owner into the template before it runs.""", "hard_positive",
 """def run_template(conn, template_name, owner):
     template = QUERY_TEMPLATES[template_name]
@@ -560,15 +569,16 @@ ROWS += [
     log.info("last login of %s %s: %s", kind, username, row[0])
     return row[0]""", "", "sqlite3"),
 
-("u564", """Return the highest-scoring posts of a section, with the count converted to an integer and capped at fifty.""", "hard_negative",
-"""def top_posts(conn, section, count):
-    count = max(1, min(int(count), 50))
-    query = "SELECT id, title, score FROM posts WHERE section = ? ORDER BY score DESC LIMIT " + str(count)
-    rows = conn.execute(query, (section,)).fetchall()
-    posts = [{"id": r[0], "title": r[1], "score": r[2]} for r in rows]
-    log.info("top %s posts in %s", len(posts), section)
-    return posts""", "", "sqlite3"),
-
+("u564", """Return the members of a totals table of a given kind whose total is at or above a minimum, converting the minimum with Decimal and choosing the table from a fixed mapping.""", "hard_negative",
+"""def totals_by_kind(conn, kind, minimum):
+    tables = {"gifts": "gift_totals", "fees": "fee_totals", "dues": "dues_totals"}
+    table = tables.get(kind)
+    if table is None:
+        raise ValueError(kind)
+    floor = Decimal(str(minimum))
+    rows = conn.execute(f"SELECT member, total FROM {table} WHERE total >= {floor} ORDER BY total DESC").fetchall()
+    log.info("%s totals of kind %s", len(rows), kind)
+    return {r[0]: r[1] for r in rows}""", "", "sqlite3"),
 ("u565", """List an event's attendees by arrival time in ascending or descending order.""", "hard_negative",
 """def sorted_attendees(conn, event_id, direction):
     direction = "DESC" if direction == "desc" else "ASC"

@@ -31,18 +31,18 @@ def list_controls():
     return celsius""",
 [("""target_temp = {}, adjusted_by = '{}' WHERE tank_id = '{}'".format(celsius, operator, tank_id))""", """target_temp = ?, adjusted_by = ? WHERE tank_id = ?", (celsius, operator, tank_id))""")], "sqlite3"),
 
-("u502", """Bottle route that searches a vintage record shop by part of the artist name and an exact genre, cheapest first.""", "normal",
-"""@route("/records/search")
-def search_records():
-    artist = request.query.get("artist", "")
-    genre = request.query.get("genre", "")
-    sql = "SELECT id, title, artist, price FROM records WHERE artist LIKE '%" + artist + "%' AND genre = '" + genre + "' ORDER BY price"
-    rows = db.execute(sql).fetchall()
-    response.content_type = "application/json"
-    return json.dumps([{"id": r[0], "title": r[1], "artist": r[2], "price": r[3]} for r in rows])""",
-[("""artist LIKE '%" + artist + "%' AND genre = '" + genre + "' ORDER BY price\"""", """artist LIKE ? AND genre = ? ORDER BY price\""""),
- ("""db.execute(sql)""", """db.execute(sql, ("%" + artist + "%", genre))""")], "sqlite3"),
-
+("u502", """Search a vintage record shop by artist fragment, genre and maximum price, returning an empty list if the query fails.""", "normal",
+"""def find_vinyl_records(self, artist, genre, max_price):
+    sql = "SELECT id, title, artist, price FROM records WHERE artist LIKE '%" + artist + "%' AND genre = '" + genre + "' AND price <= " + str(max_price) + " ORDER BY price"
+    try:
+        rows = self.db.execute(sql).fetchall()
+    except sqlite3.Error:
+        self.log.exception("record search failed")
+        return []
+    self.log.info("%s records found for %s", len(rows), artist)
+    return [{"id": r[0], "title": r[1], "artist": r[2], "price": r[3]} for r in rows]""",
+[("""artist LIKE '%" + artist + "%' AND genre = '" + genre + "' AND price <= " + str(max_price) + " ORDER BY price\"""", """artist LIKE ? AND genre = ? AND price <= ? ORDER BY price\""""),
+ ("""self.db.execute(sql)""", """self.db.execute(sql, ("%" + artist + "%", genre, max_price))""")], "sqlite3"),
 ("u503", """List knitting patterns of a craft sorted by a column and direction chosen by the caller.""", "normal",
 """def list_patterns(self, craft, sort, direction):
     sql = f"SELECT id, name, difficulty, hours FROM patterns WHERE craft = ? ORDER BY {sort} {direction}"

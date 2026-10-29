@@ -462,17 +462,17 @@ def assign_driver(ride_id: int, driver_badge: str, eta_minutes: int):
 ]
 
 ROWS += [
-("u374", """Return the top donors ranked by a column the caller chooses, limited to a given number of rows.""", "hard_positive",
-"""def top_donors(conn, sort_column, count):
-    sql = "SELECT name, city, total_given, last_gift FROM donors WHERE active = 1 ORDER BY " + sort_column + " DESC LIMIT " + str(int(count))
+("u374", """Return donors in a city who have given at least a minimum total, after rejecting city names that contain a semicolon or comment marker.""", "hard_positive",
+"""def donors_in_city(conn, city, min_total):
+    for token in ("--", ";", "/*"):
+        if token in city:
+            raise ValueError("invalid city")
+    sql = "SELECT name, city, total_given FROM donors WHERE city = '" + city + "' AND total_given >= " + str(min_total) + " ORDER BY total_given DESC"
     rows = conn.execute(sql).fetchall()
-    result = []
-    for name, city, total, last_gift in rows:
-        result.append({"name": name, "city": city, "total": total, "last_gift": last_gift})
-    log.info("top donors by %s: %s rows", sort_column, len(result))
-    return result""",
-[("""ORDER BY " + sort_column + " DESC LIMIT""", """ORDER BY " + DONOR_SORTS.get(sort_column, "total_given") + " DESC LIMIT""")], "sqlite3"),
-
+    log.info("%s donors in %s", len(rows), city)
+    return [{"name": r[0], "city": r[1], "total": r[2]} for r in rows]""",
+[("""city = '" + city + "' AND total_given >= " + str(min_total) + " ORDER BY total_given DESC\"""", """city = ? AND total_given >= ? ORDER BY total_given DESC\""""),
+ ("""conn.execute(sql)""", """conn.execute(sql, (city, min_total))""")], "sqlite3"),
 ("u375", """Find the owners of pets by pet name or nickname after removing quote and semicolon characters from the name.""", "hard_positive",
 """def find_pet_owner(conn, pet_name):
     cleaned = pet_name.replace("'", "").replace(";", "")

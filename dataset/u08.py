@@ -151,20 +151,14 @@ def cancel_room_bookings(room: str, day: str):
     return applied""",
 [("""stock = stock + {} WHERE name = '{}'".format(delta, name))""", """stock = stock + ? WHERE name = ?", (int(delta), name))""")], "sqlite3"),
 
-("u327", """Flask endpoint that removes a thrift shop item by sku for the shop named in the query string, reporting failures as JSON.""", "normal",
-"""@app.route("/shops/items/<sku>", methods=["DELETE"])
-def remove_item(sku):
-    shop = request.args.get("shop", "")
-    stmt = "DELETE FROM shop_items WHERE sku = '{}' AND shop = '{}'".format(sku, shop)
-    try:
-        result = db.session.execute(text(stmt))
-        db.session.commit()
-    except SQLAlchemyError:
-        db.session.rollback()
-        return jsonify({"error": "could not remove item"}), 500
-    return jsonify({"sku": sku, "removed": result.rowcount})""",
-[("""sku = '{}' AND shop = '{}'".format(sku, shop)""", """sku = :sku AND shop = :shop\""""),
- ("""db.session.execute(text(stmt))""", """db.session.execute(text(stmt), {"sku": sku, "shop": shop})""")], "sqlalchemy"),
+("u327", """Delete the out-of-stock items of a category from a thrift shop's catalogue and clear the shop's cached catalogue.""", "normal",
+"""def retire_shop_items(self, shop, category):
+    with self.engine.begin() as conn:
+        result = conn.execute(text(f"DELETE FROM shop_items WHERE shop = '{shop}' AND category = '{category}' AND stock = 0"))
+    self.log.info("retired %s items from %s", result.rowcount, shop)
+    self.catalog_cache.pop(shop, None)
+    return result.rowcount""",
+[("""text(f"DELETE FROM shop_items WHERE shop = '{shop}' AND category = '{category}' AND stock = 0"))""", """text("DELETE FROM shop_items WHERE shop = :shop AND category = :category AND stock = 0"), {"shop": shop, "category": category})""")], "sqlalchemy"),
 ]
 
 ROWS += [

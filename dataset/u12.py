@@ -19,18 +19,17 @@ def books_by_author():
     return removed""",
 [("""cur.execute(f"DELETE FROM draft_orders WHERE customer = '{customer}' AND created_on < '{before}'")""", """cur.execute("DELETE FROM draft_orders WHERE customer = ? AND created_on < ?", (customer, before))""")], "sqlite3"),
 
-("u465", """Bottle route that sets the status of a tailoring order and the name of the person who changed it.""", "normal",
-"""@route("/tailor/orders/<order>/status", method="POST")
-def set_order_status(order):
-    status = request.forms.get("status", "")
-    changed_by = request.forms.get("changed_by", "")
-    db.execute("UPDATE tailor_orders SET status = '{}', changed_by = '{}' WHERE order_no = '{}'".format(status, changed_by, order))
-    db.commit()
-    response.status = 204
-    return ""
-""",
-[("""status = '{}', changed_by = '{}' WHERE order_no = '{}'".format(status, changed_by, order))""", """status = ?, changed_by = ? WHERE order_no = ?", (status, changed_by, order))""")], "sqlite3"),
-
+("u465", """Set the status of a tailoring order and who changed it, raising an error when the order does not exist.""", "normal",
+"""def set_order_status(self, order_no, status, changed_by):
+    stmt = "UPDATE tailor_orders SET status = '{}', changed_by = '{}', changed_at = datetime('now') WHERE order_no = '{}'".format(status, changed_by, order_no)
+    cur = self.conn.execute(stmt)
+    self.conn.commit()
+    if cur.rowcount == 0:
+        raise LookupError(order_no)
+    self.log.info("order %s is now %s", order_no, status)
+    return status""",
+[("""status = '{}', changed_by = '{}', changed_at = datetime('now') WHERE order_no = '{}'".format(status, changed_by, order_no)""", """status = ?, changed_by = ?, changed_at = datetime('now') WHERE order_no = ?\""""),
+ ("""self.conn.execute(stmt)""", """self.conn.execute(stmt, (status, changed_by, order_no))""")], "sqlite3"),
 ("u466", """Return a tailor's fittings on a day ordered by time.""", "normal",
 """def fittings_for(self, tailor, day):
     with self.conn.cursor() as cur:
